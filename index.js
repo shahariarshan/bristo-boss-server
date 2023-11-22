@@ -3,6 +3,7 @@ const app = express()
 const cors = require('cors');
 const jwt = require('jsonwebtoken')
 require('dotenv').config()
+const stripe = require('stripe')(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 5000
 
 
@@ -36,6 +37,7 @@ async function run() {
         const reviewCollections = client.db('bistroDb').collection('reviews')
         const cartCollections = client.db('bistroDb').collection('carts')
         const usersCollections = client.db('bistroDb').collection('users')
+        const paymentCollections = client.db('bistroDb').collection('payments')
 
 
         // jwt access token created 
@@ -44,6 +46,34 @@ async function run() {
             const token = jwt.sign(user, process.env.ACCESS_TOKEN_SECRET, { expiresIn: '1h' });
             res.send({ token })
         })
+        //    -----------------//   MiddleWear  //------------
+        const verifyToken = (req, res, next) => {
+            // console.log('inside of token',req.headers.authorization);
+            if (!req.headers.authorization) {
+                return res.status(401).send({ message: "unauthorized access" })
+            }
+            const token = req.headers.authorization.split(' ')[1]
+            jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
+                if (err) {
+                    return res.status(401).send({ message: 'unauthorized access' })
+                }
+                req.decoded = decoded;
+                next()
+            })
+
+        }
+
+        // user verify admin after verify token 
+        const verifyAdmin = async (req, res, next) => {
+            const email = req.decoded.email
+            const query = { email: email }
+            const user = await usersCollections.findOne(query)
+            const isAdmin = user?.role === 'admin'
+            if (!isAdmin) {
+                return res.status(403).send({ message: 'forbidden access' })
+            }
+            next()
+        }
 
         // all menu collection getting from db 
 
@@ -53,28 +83,28 @@ async function run() {
         })
 
         // menu item update 
-        app.get('/menu/:id',async(req,res)=>{
-            const id =req.params.id
-            const query = {_id:(id)}
-            const result =await menuCollections.findOne(query)
+        app.get('/menu/:id', async (req, res) => {
+            const id = req.params.id
+            const query = { _id: (id) }
+            const result = await menuCollections.findOne(query)
             res.send(result)
 
         })
         // update menu 
-        app.patch('/menu/:id',async(req,res)=>{
-            const item =req.body 
-            const id =req.params.id
-            const filter = {_id: new ObjectId(id)}
+        app.patch('/menu/:id', async (req, res) => {
+            const item = req.body
+            const id = req.params.id
+            const filter = { _id: new ObjectId(id) }
             const updatedDoc = {
-                $set:{
-                    name:item.name,
-                    category:item.category,
-                    price:item.price,
-                    recipe:item.recipe,
-                    image:item.image
+                $set: {
+                    name: item.name,
+                    category: item.category,
+                    price: item.price,
+                    recipe: item.recipe,
+                    image: item.image
                 }
             }
-            const result =await menuCollections.updateOne(filter,updatedDoc)
+            const result = await menuCollections.updateOne(filter, updatedDoc)
             res.end(result)
         })
 
@@ -122,34 +152,56 @@ async function run() {
             const result = await cartCollections.deleteOne(query)
             res.send(result)
         })
-        //    -----------------//   MiddleWear  //------------
-        const verifyToken = (req, res, next) => {
-            // console.log('inside of token',req.headers.authorization);
-            if (!req.headers.authorization) {
-                return res.status(401).send({ message: "unauthorized access" })
-            }
-            const token = req.headers.authorization.split(' ')[1]
-            jwt.verify(token, process.env.ACCESS_TOKEN_SECRET, (err, decoded) => {
-                if (err) {
-                    return res.status(401).send({ message: 'unauthorized access' })
-                }
-                req.decoded = decoded;
-                next()
+
+
+        //    -----------------//   users   //------------
+
+
+        //TODO: payment{
+        //     1.install stripe.js
+        //     2.require __stripe and secret_key
+        // }
+        app.post('/create-payment-intent', async (req, res) => {
+            const { price } = req.body;
+            const amount = parseInt(price * 100)
+            console.log('amount inside the intent',amount);
+            const paymentIntent = await stripe.paymentIntents.create({
+                amount:amount,
+                currency:'usd',
+                payment_method_types:['card']
+
+            }) 
+            res.send({
+                clientSecret:paymentIntent.client_secret
             })
+        })
 
-        }
-
-        // user verify admin after verify token 
-        const verifyAdmin = async (req, res, next) => {
-            const email = req.decoded.email
-            const query = { email: email }
-            const user = await usersCollections.findOne(query)
-            const isAdmin = user?.role === 'admin'
-            if (!isAdmin) {
-                return res.status(403).send({ message: 'forbidden access' })
+        // payment get from bd 
+        app.get('/payments/:email',verifyToken,async(req,res)=>{
+            const query ={email: req.params.email}
+            if(req.params.email !== req.decoded.email){
+                return res.status(403).send({message:'forbidden access'})
             }
-            next()
-        }
+            const result = await paymentCollections.find(query).toArray()
+            res.send(result)
+        })
+
+        // payment db 
+        app.post('/payments',async(req,res)=>{
+            const payment =req.body
+            const paymentResult = await paymentCollections.insertOne(payment)
+
+            // carefully delete each item from the cart 
+            console.log('payment info',payment);
+            const query = {_id:{
+                $in:payment.cartIds.map(id=>new ObjectId(id))
+            }};
+            const deleteResult = await cartCollections.deleteMany(query)
+            res.send({paymentResult,deleteResult})
+        })
+
+
+
 
         //    -----------------//   users   //------------
         // users get from db 
